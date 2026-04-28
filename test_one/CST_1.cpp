@@ -81,7 +81,7 @@ int main() {
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const unsigned short nodeId = 3;
+    const unsigned short nodeId = 5;
 
     // Motor/drive scaling (MUST match EPOS Studio configuration)
     const double ratedTorque_Nm = 1.068;      // your drive's Rated Torque (0x6076), e.g. 735 mN·m

@@ -81,14 +81,14 @@ int main() {
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const unsigned short nodeId = 3;
+    const unsigned short nodeId = 5;
 
     // Motor/drive scaling (MUST match EPOS Studio configuration)
     const double ratedTorque_Nm = 1.068;      // your drive's Rated Torque (0x6076), e.g. 735 mN·m
     const double Kt_Nm_per_A    = 0.0712;     // toconstexpr uint16_t IDX_CONTROLWORD  = 0x6040; // Controlwordrque constant from Studio (e.g., 71.2 mN·m/A)
 
     // Desired command (constant torque)
-    const double target_tau_Nm  = -0.20;       // *** run at 0.25 N·m ***
+    const double target_tau_Nm  = -0.30;       // *** run at 0.25 N·m ***
     const uint16_t maxTorque_permille = 1000;  // safety cap: allow up to 60% rated (>= needed ~340‰)
 
     // Loop/print

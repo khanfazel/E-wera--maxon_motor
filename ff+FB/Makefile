@@ -1,5 +1,5 @@
 CXX = g++
-SRC = ff.cpp
+SRC = ff_pd.cpp
 OUT = ff_run
 
 EPOS_INC = /home/e-wear/EPOS_Linux_Library/include

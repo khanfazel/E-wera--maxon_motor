@@ -77,7 +77,7 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const uint16_t nodeId    = 3;
+    const uint16_t nodeId    = 5;
 
     // Mechanics
     const int countsPerMotorRev = 4096; // 1024 * 4

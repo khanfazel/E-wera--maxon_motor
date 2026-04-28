@@ -232,6 +232,15 @@ struct FFParams
     double maxMotorTorqueCmd_Nm = 500;   // software clamp
 };
 
+struct PDParams
+{
+    // Kp unit: Nm/rad on joint side
+    double Kp = 0.0;
+
+    // Kd unit: Nm/(rad/s) on joint side
+    double Kd = 0.0;
+};
+
 static double compute_joint_feedforward_torque_Nm(double q_deg,
                                                   double qdd_deg_s2,
                                                   const FFParams& p)
@@ -243,6 +252,29 @@ static double compute_joint_feedforward_torque_Nm(double q_deg,
     const double gravity_term = p.m1_kg * p.g * p.lc1_m * std::sin(q_rad);
 
     return inertia_term + gravity_term;
+}
+
+static double compute_pd_torque_joint_Nm(double q_ref_deg,
+                                         double q_link_deg,
+                                         double qd_ref_deg_s,
+                                         double qd_link_deg_s,
+                                         const PDParams& pd)
+{
+    // Position error in degrees
+    const double error_deg = q_ref_deg - q_link_deg;
+
+    // Velocity error in deg/s
+    const double error_dot_deg_s = qd_ref_deg_s - qd_link_deg_s;
+
+    // Convert errors to rad and rad/s because Kp and Kd are in SI units
+    const double error_rad = deg2rad(error_deg);
+    const double error_dot_rad_s = deg2rad(error_dot_deg_s);
+
+    // PD torque on the joint side
+    const double tau_pd_joint_Nm =
+        pd.Kp * error_rad + pd.Kd * error_dot_rad_s;
+
+    return tau_pd_joint_Nm;
 }
 
 static double joint_to_motor_torque_Nm(double tau_joint_Nm, const FFParams& p)
@@ -257,7 +289,7 @@ static double signed_dead_torque_Nm(double qd_deg_s, const FFParams& p)
     if (std::abs(qd_deg_s) < p.velThreshold_deg_s) {
         return 0.0;
     }
-    return p.deadTorque_motor_Nm * tanh(qd_deg_s / 10.0);
+    return p.deadTorque_motor_Nm * signum(qd_deg_s);
 }
 
 // ---------- Logging ----------
@@ -314,7 +346,7 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const unsigned short nodeId = 3;
+    const unsigned short nodeId = 5;
 
     // Files
     const std::string inputCsvPath = "trajectory.csv";
@@ -328,7 +360,7 @@ int main()
     const double Kt_Nm_per_A    = 0.0712; // optional display only
 
     // Encoder for display only
-    const int enc_counts_rev = 1024;
+    const int enc_counts_rev = 1024*4;
 
     // Safety
     const uint16_t maxTorque_permille = 1000; // 1000 = 100% rated
@@ -346,6 +378,13 @@ int main()
     ff.deadTorque_motor_Nm = 0.1602;
     ff.velThreshold_deg_s = 0.5;
     ff.maxMotorTorqueCmd_Nm = 0.50; // safe software clamp
+    
+    PDParams pd;
+
+// Start small first.
+// These are joint-side gains, not motor-side gains.
+pd.Kp = 1.0;     // Nm/rad
+pd.Kd = 0.05;    // Nm/(rad/s)
 
     // =========================================================
 
@@ -456,7 +495,7 @@ int main()
         sdo_read_any(nodeId, IDX_TORQUE_ACT, SUB0, &tq_pm,      sizeof(tq_pm),      "Read 0x6077 Torque");
 
         const double tau_motor_actual_Nm = (tq_pm / 1000.0) * ratedTorque_Nm;
-        const double motor_pos_deg_est = (pos_counts * 360.0) / enc_counts_rev;
+        const double motor_pos_deg_est = (pos_counts * 360.0) / (enc_counts_rev*ff.gearRatio);
 
         LogRow row;
         row.t_s = k * dt_s;
