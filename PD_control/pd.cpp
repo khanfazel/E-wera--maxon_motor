@@ -442,7 +442,7 @@ int main()
     ff.gearRatio = 80.0;
     ff.efficiency = 1.0;
 
-    ff.deadTorque_motor_Nm = 0;
+    ff.deadTorque_motor_Nm = 0.1602;
     ff.velThreshold_deg_s = 0.5;
 
     // Motor-side software clamp.
@@ -454,8 +454,8 @@ int main()
 
     // These gains are on the JOINT SIDE.
     // Start small first.
-    pd.Kp = 15.0;    // Nm/rad
-    pd.Kd = 1;   // Nm/(rad/s)
+    pd.Kp = 20.0;    // Nm/rad
+    pd.Kd = 1.5;   // Nm/(rad/s)
 
     // =========================================================
 
