@@ -473,7 +473,7 @@ int main()
     pd.Kp = 35.0;   // Nm/rad
 
     // Kd = 7 was too high/noisy. Start with this.
-    pd.Kd = 0.3;    // Nm/(rad/s)
+    pd.Kd = 1;    // Nm/(rad/s)
 
     // Limit only the PD torque on the joint side.
     // 30 Nm joint torque / 80 gear ratio = 0.375 Nm motor torque.
