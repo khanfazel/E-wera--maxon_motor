@@ -454,8 +454,8 @@ int main()
 
     // These gains are on the JOINT SIDE.
     // Start small first.
-    pd.Kp = 30.0;    // Nm/rad
-    pd.Kd = 5;   // Nm/(rad/s)
+    pd.Kp = 35.0;    // Nm/rad
+    pd.Kd = 7;   // Nm/(rad/s)
 
     // =========================================================
 
