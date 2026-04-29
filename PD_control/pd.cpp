@@ -141,7 +141,8 @@ struct LogRow
 
     // Actual link/joint values from encoder
     double q_link_deg = 0.0;
-    double qd_link_deg_s = 0.0;
+    double qd_link_raw_deg_s = 0.0;
+    double qd_link_filt_deg_s = 0.0;
 
     // Errors
     double pos_error_deg = 0.0;
@@ -149,9 +150,11 @@ struct LogRow
 
     // Torques
     double tau_joint_ff_Nm = 0.0;
-    double tau_pd_joint_Nm = 0.0;
+    double tau_pd_joint_raw_Nm = 0.0;
+    double tau_pd_joint_limited_Nm = 0.0;
     double tau_joint_total_Nm = 0.0;
     double tau_dead_motor_Nm = 0.0;
+    double tau_motor_cmd_before_clamp_Nm = 0.0;
     double tau_motor_cmd_Nm = 0.0;
     double tau_motor_actual_Nm = 0.0;
 
@@ -272,7 +275,7 @@ struct FFParams
     double deadTorque_motor_Nm = 0.1602; // motor-side dead torque [Nm]
     double velThreshold_deg_s = 0.5;     // desired velocity threshold [deg/s]
 
-    double maxMotorTorqueCmd_Nm = 0.50;  // software torque clamp [Nm]
+    double maxMotorTorqueCmd_Nm = 0.50;  // motor-side software torque clamp [Nm]
 };
 
 // ---------- PD parameters ----------
@@ -283,6 +286,14 @@ struct PDParams
 
     // Joint-side derivative gain [Nm/(rad/s)]
     double Kd = 0.0;
+
+    // Joint-side PD torque limit [Nm]
+    double maxPdTorqueJoint_Nm = 30.0;
+
+    // Low-pass filter coefficient for actual joint velocity
+    // Smaller = smoother but more delay.
+    // Larger = faster but noisier.
+    double velocityFilterAlpha = 0.10;
 };
 
 // ---------- Dynamics ----------
@@ -363,13 +374,16 @@ static bool save_log_csv(const std::string& outPath,
          << "qd_ref_deg_s,"
          << "qdd_ref_deg_s2,"
          << "q_link_deg,"
-         << "qd_link_deg_s,"
+         << "qd_link_raw_deg_s,"
+         << "qd_link_filt_deg_s,"
          << "pos_error_deg,"
          << "vel_error_deg_s,"
          << "tau_joint_ff_Nm,"
-         << "tau_pd_joint_Nm,"
+         << "tau_pd_joint_raw_Nm,"
+         << "tau_pd_joint_limited_Nm,"
          << "tau_joint_total_Nm,"
          << "tau_dead_motor_Nm,"
+         << "tau_motor_cmd_before_clamp_Nm,"
          << "tau_motor_cmd_Nm,"
          << "tau_motor_actual_Nm,"
          << "motor_pos_counts,"
@@ -383,13 +397,16 @@ static bool save_log_csv(const std::string& outPath,
              << r.qd_ref_deg_s << ","
              << r.qdd_ref_deg_s2 << ","
              << r.q_link_deg << ","
-             << r.qd_link_deg_s << ","
+             << r.qd_link_raw_deg_s << ","
+             << r.qd_link_filt_deg_s << ","
              << r.pos_error_deg << ","
              << r.vel_error_deg_s << ","
              << r.tau_joint_ff_Nm << ","
-             << r.tau_pd_joint_Nm << ","
+             << r.tau_pd_joint_raw_Nm << ","
+             << r.tau_pd_joint_limited_Nm << ","
              << r.tau_joint_total_Nm << ","
              << r.tau_dead_motor_Nm << ","
+             << r.tau_motor_cmd_before_clamp_Nm << ","
              << r.tau_motor_cmd_Nm << ","
              << r.tau_motor_actual_Nm << ","
              << r.motor_pos_counts << ","
@@ -415,7 +432,7 @@ int main()
 
     // Files
     const std::string inputCsvPath = "trajectory.csv";
-    const std::string outputLogPath = "pd_feedforward_log.csv";
+    const std::string outputLogPath = "pd_feedforward_log_filtered.csv";
 
     // CSV sample time
     const double dt_s = 0.002; // 2 ms between CSV rows
@@ -446,16 +463,25 @@ int main()
     ff.velThreshold_deg_s = 0.5;
 
     // Motor-side software clamp.
-    // Start low for safety.
+    // Keep this safe while tuning.
     ff.maxMotorTorqueCmd_Nm = 0.50;
 
     // ---------- PD control parameters ----------
     PDParams pd;
 
     // These gains are on the JOINT SIDE.
-    // Start small first.
-    pd.Kp = 35.0;    // Nm/rad
-    pd.Kd = 7;   // Nm/(rad/s)
+    pd.Kp = 35.0;   // Nm/rad
+
+    // Kd = 7 was too high/noisy. Start with this.
+    pd.Kd = 0.3;    // Nm/(rad/s)
+
+    // Limit only the PD torque on the joint side.
+    // 30 Nm joint torque / 80 gear ratio = 0.375 Nm motor torque.
+    pd.maxPdTorqueJoint_Nm = 30.0;
+
+    // Low-pass filter value for measured joint velocity.
+    // Try 0.05 to 0.20.
+    pd.velocityFilterAlpha = 0.10;
 
     // =========================================================
 
@@ -482,6 +508,12 @@ int main()
     std::cout << "[INFO] PD gains: Kp = " << pd.Kp
               << " Nm/rad, Kd = " << pd.Kd
               << " Nm/(rad/s)\n";
+
+    std::cout << "[INFO] PD joint torque limit = "
+              << pd.maxPdTorqueJoint_Nm << " Nm\n";
+
+    std::cout << "[INFO] Velocity filter alpha = "
+              << pd.velocityFilterAlpha << "\n";
 
     // ---------- Open device ----------
     handle = VCS_OpenDevice(deviceName,
@@ -585,8 +617,9 @@ int main()
 
     bool first_velocity_sample = true;
     double prev_q_link_deg = 0.0;
+    double qd_link_filt_deg_s = 0.0;
 
-    std::cout << "[INFO] Starting PD + feedforward torque playback...\n";
+    std::cout << "[INFO] Starting PD + feedforward torque playback with low-pass velocity filter...\n";
 
     for (size_t k = 0; k < samples.size(); ++k) {
 
@@ -594,13 +627,8 @@ int main()
         // 1. Desired trajectory from CSV
         // =====================================================
 
-        // Desired joint angle [deg]
         const double q_ref_deg = samples[k].q_deg;
-
-        // Desired joint acceleration [deg/s^2]
         const double qdd_ref_deg_s2 = samples[k].qdd_deg_s2;
-
-        // Desired joint velocity calculated from CSV angle [deg/s]
         const double qd_ref_deg_s = qd_ref_deg_s_vec[k];
 
         // =====================================================
@@ -636,26 +664,35 @@ int main()
         // 3. Convert motor encoder counts to actual joint angle
         // =====================================================
 
-        // Motor angle = counts * 360 / encoder_resolution
-        // Joint angle = motor angle / gear ratio
         const double q_link_deg =
             (static_cast<double>(pos_counts) * 360.0) /
             (encoder_resolution * ff.gearRatio);
 
         // =====================================================
         // 4. Actual joint velocity by numerical differentiation
+        //    plus low-pass filtering
         // =====================================================
 
-        double qd_link_deg_s = 0.0;
+        double qd_link_raw_deg_s = 0.0;
 
         if (first_velocity_sample) {
-            qd_link_deg_s = 0.0;
+            qd_link_raw_deg_s = 0.0;
+            qd_link_filt_deg_s = 0.0;
             first_velocity_sample = false;
         } else {
-            qd_link_deg_s = (q_link_deg - prev_q_link_deg) / dt_s;
+            qd_link_raw_deg_s = (q_link_deg - prev_q_link_deg) / dt_s;
+
+            // Low-pass filter:
+            // filtered = alpha*raw + (1-alpha)*previous_filtered
+            qd_link_filt_deg_s =
+                pd.velocityFilterAlpha * qd_link_raw_deg_s +
+                (1.0 - pd.velocityFilterAlpha) * qd_link_filt_deg_s;
         }
 
         prev_q_link_deg = q_link_deg;
+
+        // This is the velocity used by the PD controller
+        const double qd_link_deg_s = qd_link_filt_deg_s;
 
         // =====================================================
         // 5. Dynamic model feedforward torque on joint side
@@ -670,25 +707,31 @@ int main()
         // 6. PD feedback torque on joint side
         // =====================================================
 
-        const double tau_pd_joint_Nm =
+        const double tau_pd_joint_raw_Nm =
             compute_pd_torque_joint_Nm(q_ref_deg,
                                        q_link_deg,
                                        qd_ref_deg_s,
                                        qd_link_deg_s,
                                        pd);
 
+        // Limit PD torque only.
+        const double tau_pd_joint_limited_Nm =
+            std::clamp(tau_pd_joint_raw_Nm,
+                       -pd.maxPdTorqueJoint_Nm,
+                       +pd.maxPdTorqueJoint_Nm);
+
         // =====================================================
         // 7. Total joint torque
         // =====================================================
 
         const double tau_joint_total_Nm =
-            tau_joint_ff_Nm + tau_pd_joint_Nm;
+            tau_joint_ff_Nm + tau_pd_joint_limited_Nm;
 
         // =====================================================
         // 8. Convert total joint torque to motor torque
         // =====================================================
 
-        double tau_motor_cmd_Nm =
+        double tau_motor_cmd_before_clamp_Nm =
             joint_to_motor_torque_Nm(tau_joint_total_Nm, ff);
 
         // =====================================================
@@ -699,14 +742,14 @@ int main()
         const double tau_dead_motor_Nm =
             signed_dead_torque_Nm(qd_ref_deg_s, ff);
 
-        tau_motor_cmd_Nm += tau_dead_motor_Nm;
+        tau_motor_cmd_before_clamp_Nm += tau_dead_motor_Nm;
 
         // =====================================================
-        // 10. Clamp motor torque command
+        // 10. Clamp final motor torque command
         // =====================================================
 
-        tau_motor_cmd_Nm =
-            std::clamp(tau_motor_cmd_Nm,
+        const double tau_motor_cmd_Nm =
+            std::clamp(tau_motor_cmd_before_clamp_Nm,
                        -ff.maxMotorTorqueCmd_Nm,
                        +ff.maxMotorTorqueCmd_Nm);
 
@@ -742,15 +785,18 @@ int main()
         row.qdd_ref_deg_s2 = qdd_ref_deg_s2;
 
         row.q_link_deg = q_link_deg;
-        row.qd_link_deg_s = qd_link_deg_s;
+        row.qd_link_raw_deg_s = qd_link_raw_deg_s;
+        row.qd_link_filt_deg_s = qd_link_filt_deg_s;
 
         row.pos_error_deg = pos_error_deg;
         row.vel_error_deg_s = vel_error_deg_s;
 
         row.tau_joint_ff_Nm = tau_joint_ff_Nm;
-        row.tau_pd_joint_Nm = tau_pd_joint_Nm;
+        row.tau_pd_joint_raw_Nm = tau_pd_joint_raw_Nm;
+        row.tau_pd_joint_limited_Nm = tau_pd_joint_limited_Nm;
         row.tau_joint_total_Nm = tau_joint_total_Nm;
         row.tau_dead_motor_Nm = tau_dead_motor_Nm;
+        row.tau_motor_cmd_before_clamp_Nm = tau_motor_cmd_before_clamp_Nm;
         row.tau_motor_cmd_Nm = tau_motor_cmd_Nm;
         row.tau_motor_actual_Nm = tau_motor_actual_Nm;
 
@@ -772,11 +818,14 @@ int main()
                       << " q_link=" << q_link_deg << " deg"
                       << " err=" << pos_error_deg << " deg"
                       << " qd_ref=" << qd_ref_deg_s << " deg/s"
-                      << " qd_link=" << qd_link_deg_s << " deg/s"
+                      << " qd_raw=" << qd_link_raw_deg_s << " deg/s"
+                      << " qd_filt=" << qd_link_filt_deg_s << " deg/s"
                       << " tau_ff=" << tau_joint_ff_Nm << " Nm"
-                      << " tau_PD=" << tau_pd_joint_Nm << " Nm"
+                      << " tau_PD_raw=" << tau_pd_joint_raw_Nm << " Nm"
+                      << " tau_PD_lim=" << tau_pd_joint_limited_Nm << " Nm"
                       << " tau_joint_total=" << tau_joint_total_Nm << " Nm"
                       << " tau_dead_motor=" << tau_dead_motor_Nm << " Nm"
+                      << " tau_motor_before_clamp=" << tau_motor_cmd_before_clamp_Nm << " Nm"
                       << " tau_motor_cmd=" << tau_motor_cmd_Nm << " Nm"
                       << " tau_motor_act=" << tau_motor_actual_Nm << " Nm"
                       << " I_est~" << est_I_A << " A"
