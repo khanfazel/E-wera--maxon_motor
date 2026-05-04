@@ -112,14 +112,14 @@ struct Config {
     std::string protocolStackName = "MAXON SERIAL V2";
     std::string interfaceName = "USB";
     std::string portName = "USB0";
-    unsigned short nodeId = 3;   // CHANGE if needed
+    unsigned short nodeId = 5;   // CHANGE if needed
 
     // ----- file -----
     std::string csvPath = "hip_torque.csv";
 
     // ----- trajectory meaning -----
     InputTorqueMode inputMode = InputTorqueMode::NormalizedJointTorque_NmPerKg;
-    double bodyMassKg = 81.0;
+    double bodyMassKg = 1.0;
 
     // ----- drivetrain -----
     double gearRatio = 80.0;

@@ -1,6 +1,6 @@
 CXX = g++
 SRC = cst_gait_csv.cpp
-OUT = cst_gait_csv
+OUT = ff_run
 
 EPOS_INC = /home/e-wear/EPOS_Linux_Library/include
 EPOS_LIB = /home/e-wear/EPOS_Linux_Library/lib/arm/v8

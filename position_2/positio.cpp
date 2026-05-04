@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cmath>
 #include <iomanip>
+#include <fstream>   // for CSV log file
+#include <cstdlib>   // for std::llabs
 
 // ---------- Globals ----------
 static void* g_handle = nullptr;
@@ -77,7 +79,7 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const uint16_t nodeId    = 5;
+    const uint16_t nodeId    = 3;
 
     // Mechanics
     const int countsPerMotorRev = 4096; // 1024 * 4
@@ -121,6 +123,25 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
     // =================================================
 
     std::cout << std::fixed << std::setprecision(3);
+    // ---------- Create CSV log file ----------
+std::ofstream logFile("step_response_log.csv");
+
+if (!logFile.is_open())
+{
+    std::cerr << "Could not create step_response_log.csv\n";
+    return 1;
+}
+
+// Write column names
+logFile << "time_s,"
+        << "target_joint_deg,"
+        << "actual_joint_deg,"
+        << "target_counts,"
+        << "actual_counts,"
+        << "error_counts,"
+        << "error_joint_deg,"
+        << "statusword_hex"
+        << "\n";
 
     const int32_t moveCounts =
         joint_deg_to_motor_counts(targetJointDeg, gearRatio, countsPerMotorRev);
@@ -242,7 +263,28 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         const int32_t errCounts = tgtActual - posActual;
         const double jointDeg =
             motor_counts_to_joint_deg(posActual, gearRatio, countsPerMotorRev);
+const double targetJointActualDeg =
+    motor_counts_to_joint_deg(tgtActual, gearRatio, countsPerMotorRev);
 
+const double errorJointDeg = targetJointActualDeg - jointDeg;
+
+const auto now = std::chrono::steady_clock::now();
+
+const double elapsedSec =
+    std::chrono::duration<double>(now - t0).count();
+
+// ---------- Write one row to CSV log file ----------
+logFile << elapsedSec << ","
+        << targetJointActualDeg << ","
+        << jointDeg << ","
+        << tgtActual << ","
+        << posActual << ","
+        << errCounts << ","
+        << errorJointDeg << ","
+        << "0x" << std::hex << statusword << std::dec
+        << "\n";
+
+logFile.flush();
         std::cout << "Actual: " << posActual
                   << " counts = " << jointDeg << " joint deg"
                   << " | Target: " << tgtActual
@@ -295,6 +337,8 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
 
     VCS_SetDisableState(g_handle, nodeId, &g_err);
     VCS_CloseDevice(g_handle, &g_err);
+    logFile.close();
+std::cout << "CSV log saved as: step_response_log.csv\n";
 
     std::cout << "Done.\n";
     return 0;

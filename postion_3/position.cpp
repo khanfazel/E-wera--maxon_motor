@@ -120,7 +120,7 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const uint16_t nodeId    = 5;
+    const uint16_t nodeId    = 3;
 
     // Mechanics
     const int countsPerMotorRev = 4096; // 1024 * 4
@@ -179,9 +179,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
     logFile << "time_s,"
             << "target_joint_deg,"
             << "actual_joint_deg,"
-            << "target_counts,"
-            << "actual_counts,"
-            << "error_counts,"
             << "error_joint_deg,"
             << "velocity_actual_avg_units,"
             << "joint_velocity_est_deg_s,"
@@ -191,7 +188,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
             << "motor_rated_torque_mNm,"
             << "motor_torque_actual_avg_Nm,"
             << "joint_torque_est_avg_Nm_no_efficiency,"
-            << "statusword_hex"
             << "\n";
 
     const int32_t moveCounts =
@@ -372,9 +368,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         logFile << elapsedSec << ","
                 << targetJointActualDeg << ","
                 << jointDeg << ","
-                << tgtActual << ","
-                << posActual << ","
-                << errCounts << ","
                 << errorJointDeg << ","
                 << velocityActualAvg << ","
                 << jointVelocityDegS << ","
@@ -384,7 +377,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
                 << motorRatedTorque_mNm << ","
                 << motorTorqueActualAvgNm << ","
                 << jointTorqueActualAvgNm_noEfficiency << ","
-                << "0x" << std::hex << statusword << std::dec
                 << "\n";
 
         // Force data to be written to disk during the test.
