@@ -20,18 +20,6 @@ constexpr uint16_t IDX_POS_ACT     = 0x6064;
 constexpr uint16_t IDX_TARGET_POS  = 0x607A;
 constexpr uint16_t IDX_ERROR_CODE  = 0x603F;
 
-// These EPOS4 objects are used only for logging.
-// 0x30D1: Current actual values, sub 1 = averaged, sub 2 = actual [mA].
-// 0x30D2: Torque actual values, sub 1 = averaged [per-thousand of motor rated torque].
-// 0x30D3: Velocity actual values, sub 1 = averaged [EPOS velocity units].
-// 0x6076: Motor rated torque [mNm], used to convert torque raw value to Nm.
-constexpr uint16_t IDX_MOTOR_RATED_TORQUE = 0x6076;
-constexpr uint16_t IDX_CURRENT_ACTUALS     = 0x30D1;
-constexpr uint16_t IDX_TORQUE_ACTUALS      = 0x30D2;
-constexpr uint16_t IDX_VELOCITY_ACTUALS    = 0x30D3;
-constexpr uint8_t  SUB_AVERAGED            = 0x01;
-constexpr uint8_t  SUB_ACTUAL              = 0x02;
-
 // ---------- Helpers ----------
 static inline bool ok(bool success, const char* step)
 {
@@ -55,25 +43,13 @@ static inline bool sdo_read_any(uint16_t nodeId,
                             data, size, &bytesRead, &g_err), tag);
 }
 
-static inline bool sdo_read_optional(uint16_t nodeId,
-                                     uint16_t idx,
-                                     uint8_t sub,
-                                     void* data,
-                                     uint32_t size)
-{
-    uint32_t bytesRead = 0;
-    unsigned int localErr = 0;
-    return VCS_GetObject(g_handle, nodeId, idx, sub,
-                         data, size, &bytesRead, &localErr);
-}
-
 // ---------- Conversion ----------
 static inline int32_t joint_deg_to_motor_counts(double jointDeg,
                                                 double gearRatio,
                                                 int countsPerMotorRev)
 {
     return static_cast<int32_t>(
-        std::llround((jointDeg / 360.0) * gearRatio * countsPerMotorRev)
+        std::llround(-(jointDeg / 360.0) * gearRatio * countsPerMotorRev)
     );
 }
 
@@ -81,25 +57,8 @@ static inline double motor_counts_to_joint_deg(int32_t motorCounts,
                                                double gearRatio,
                                                int countsPerMotorRev)
 {
-    return (static_cast<double>(motorCounts) * 360.0) /
+    return (static_cast<double>(-motorCounts) * 360.0) /
            (gearRatio * static_cast<double>(countsPerMotorRev));
-}
-
-static inline double motor_rpm_to_joint_deg_s(int32_t motorVelocityRpm,
-                                               double gearRatio)
-{
-    // If your EPOS velocity unit is rpm, this converts motor rpm to joint deg/s.
-    // joint_deg/s = motor_rpm * 360 deg/rev / 60 s/min / gearRatio
-    return (static_cast<double>(motorVelocityRpm) * 6.0) / gearRatio;
-}
-
-static inline double torque_actual_raw_to_motor_Nm(int16_t torqueRaw,
-                                                    uint32_t motorRatedTorque_mNm)
-{
-    // EPOS torque actual raw value is in 1/1000 of motor rated torque.
-    // motorRatedTorque_mNm / 1000 gives Nm.
-    return (static_cast<double>(torqueRaw) / 1000.0) *
-           (static_cast<double>(motorRatedTorque_mNm) / 1000.0);
 }
 
 static inline void print_epos_error_code(uint16_t nodeId)
@@ -164,31 +123,25 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
     // =================================================
 
     std::cout << std::fixed << std::setprecision(3);
-
     // ---------- Create CSV log file ----------
-    // This file will be saved in the same folder from where you run the program.
-    std::ofstream logFile("step_response_log.csv");
+std::ofstream logFile("step_response_log.csv");
 
-    if (!logFile.is_open())
-    {
-        std::cerr << "Could not create step_response_log.csv\n";
-        return 1;
-    }
+if (!logFile.is_open())
+{
+    std::cerr << "Could not create step_response_log.csv\n";
+    return 1;
+}
 
-    // Write column names once at the top of the CSV file.
-    logFile << "time_s,"
-            << "target_joint_deg,"
-            << "actual_joint_deg,"
-            << "error_joint_deg,"
-            << "velocity_actual_avg_units,"
-            << "joint_velocity_est_deg_s,"
-            << "current_actual_mA,"
-            << "current_actual_avg_mA,"
-            << "torque_actual_avg_raw_per_1000,"
-            << "motor_rated_torque_mNm,"
-            << "motor_torque_actual_avg_Nm,"
-            << "joint_torque_est_avg_Nm_no_efficiency,"
-            << "\n";
+// Write column names
+logFile << "time_s,"
+        << "target_joint_deg,"
+        << "actual_joint_deg,"
+        << "target_counts,"
+        << "actual_counts,"
+        << "error_counts,"
+        << "error_joint_deg,"
+        << "statusword_hex"
+        << "\n";
 
     const int32_t moveCounts =
         joint_deg_to_motor_counts(targetJointDeg, gearRatio, countsPerMotorRev);
@@ -226,21 +179,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         {
             std::cout << "Mode display = " << static_cast<int>(opModeDisp) << "\n";
         }
-    }
-
-    // ---------- Read motor rated torque for torque conversion ----------
-    // 0x6076 is motor rated torque in mNm. If this read fails, the code still logs
-    // the raw torque value from 0x30D2:01, but Nm conversion will stay 0.
-    uint32_t motorRatedTorque_mNm = 0;
-    if (sdo_read_any(nodeId, IDX_MOTOR_RATED_TORQUE, SUB0,
-                     &motorRatedTorque_mNm, sizeof(motorRatedTorque_mNm),
-                     "Read 0x6076 Motor Rated Torque"))
-    {
-        std::cout << "Motor rated torque: " << motorRatedTorque_mNm << " mNm\n";
-    }
-    else
-    {
-        std::cerr << "Warning: Could not read motor rated torque. Torque raw value will still be logged.\n";
     }
 
     // ---------- Set profile ----------
@@ -311,12 +249,6 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         int32_t tgtActual = 0;
         uint16_t statusword = 0;
 
-        // Extra values for logging
-        int32_t velocityActualAvg = 0;     // 0x30D3:01, velocity actual value averaged
-        int32_t currentActualAvg_mA = 0;   // 0x30D1:01, current actual value averaged [mA]
-        int32_t currentActual_mA = 0;      // 0x30D1:02, current actual value [mA]
-        int16_t torqueActualAvgRaw = 0;    // 0x30D2:01, torque actual avg [1/1000 rated torque]
-
         if (!sdo_read_any(nodeId, IDX_POS_ACT, SUB0, &posActual, sizeof(posActual),
                           "Read 0x6064 Position Actual Value"))
         {
@@ -328,68 +260,35 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         sdo_read_any(nodeId, IDX_STATUSWORD, SUB0, &statusword, sizeof(statusword),
                      "Read 0x6041 Statusword");
 
-        // ---------- Read dynamic response values for logging ----------
-        // These reads are non-fatal: if one value fails, the program keeps moving
-        // and logs zero for that value.
-        sdo_read_optional(nodeId, IDX_VELOCITY_ACTUALS, SUB_AVERAGED,
-                          &velocityActualAvg, sizeof(velocityActualAvg));
-
-        sdo_read_optional(nodeId, IDX_CURRENT_ACTUALS, SUB_AVERAGED,
-                          &currentActualAvg_mA, sizeof(currentActualAvg_mA));
-
-        sdo_read_optional(nodeId, IDX_CURRENT_ACTUALS, SUB_ACTUAL,
-                          &currentActual_mA, sizeof(currentActual_mA));
-
-        sdo_read_optional(nodeId, IDX_TORQUE_ACTUALS, SUB_AVERAGED,
-                          &torqueActualAvgRaw, sizeof(torqueActualAvgRaw));
-
         const int32_t errCounts = tgtActual - posActual;
         const double jointDeg =
             motor_counts_to_joint_deg(posActual, gearRatio, countsPerMotorRev);
-        const double targetJointActualDeg =
-            motor_counts_to_joint_deg(tgtActual, gearRatio, countsPerMotorRev);
-        const double errorJointDeg = targetJointActualDeg - jointDeg;
+const double targetJointActualDeg =
+    motor_counts_to_joint_deg(tgtActual, gearRatio, countsPerMotorRev);
 
-        const double jointVelocityDegS =
-            motor_rpm_to_joint_deg_s(velocityActualAvg, gearRatio);
+const double errorJointDeg = targetJointActualDeg - jointDeg;
 
-        const double motorTorqueActualAvgNm =
-            torque_actual_raw_to_motor_Nm(torqueActualAvgRaw, motorRatedTorque_mNm);
+const auto now = std::chrono::steady_clock::now();
 
-        // This is only an estimate. It ignores gearbox efficiency and losses.
-        const double jointTorqueActualAvgNm_noEfficiency =
-            motorTorqueActualAvgNm * gearRatio;
+const double elapsedSec =
+    std::chrono::duration<double>(now - t0).count();
 
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsedSec =
-            std::chrono::duration<double>(now - t0).count();
+// ---------- Write one row to CSV log file ----------
+logFile << elapsedSec << ","
+        << targetJointActualDeg << ","
+        << jointDeg << ","
+        << tgtActual << ","
+        << posActual << ","
+        << errCounts << ","
+        << errorJointDeg << ","
+        << "0x" << std::hex << statusword << std::dec
+        << "\n";
 
-        // ---------- Write one row to CSV log file ----------
-        logFile << elapsedSec << ","
-                << targetJointActualDeg << ","
-                << jointDeg << ","
-                << errorJointDeg << ","
-                << velocityActualAvg << ","
-                << jointVelocityDegS << ","
-                << currentActual_mA << ","
-                << currentActualAvg_mA << ","
-                << torqueActualAvgRaw << ","
-                << motorRatedTorque_mNm << ","
-                << motorTorqueActualAvgNm << ","
-                << jointTorqueActualAvgNm_noEfficiency << ","
-                << "\n";
-
-        // Force data to be written to disk during the test.
-        // This is useful if the program stops early or faults.
-        logFile.flush();
-
+logFile.flush();
         std::cout << "Actual: " << posActual
                   << " counts = " << jointDeg << " joint deg"
                   << " | Target: " << tgtActual
                   << " | Err: " << errCounts
-                  << " | Vel: " << velocityActualAvg << " units"
-                  << " | I: " << currentActual_mA << " mA"
-                  << " | TorqueRaw: " << torqueActualAvgRaw
                   << " | Statusword: 0x" << std::hex << statusword << std::dec
                   << "\n";
 
@@ -436,14 +335,11 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
         }
     }
 
-    // ---------- Close CSV log file ----------
-    logFile.close();
-    std::cout << "CSV log saved as: step_response_log.csv\n";
-
     VCS_SetDisableState(g_handle, nodeId, &g_err);
     VCS_CloseDevice(g_handle, &g_err);
+    logFile.close();
+std::cout << "CSV log saved as: step_response_log.csv\n";
 
     std::cout << "Done.\n";
     return 0;
 }
-

@@ -132,22 +132,12 @@ struct LogRow
     double qd_ref_deg_s = 0.0;
     double qdd_ref_deg_s2 = 0.0;
 
-    double q_model_deg = 0.0;
-    double qdd_model_deg_s2 = 0.0;
-
     double q_link_deg = 0.0;
-    double qd_link_deg_s = 0.0;
 
-    double pos_error_deg = 0.0;
-    double vel_error_deg_s = 0.0;
-
-    double tau_inertia_joint_Nm = 0.0;
-    double tau_gravity_joint_Nm = 0.0;
     double tau_joint_ff_Nm = 0.0;
-    double tau_pd_joint_Nm = 0.0;
-    double tau_joint_total_Nm = 0.0;
-
+    double tau_motor_ff_Nm = 0.0;
     double tau_dead_motor_Nm = 0.0;
+    double tau_motor_cmd_before_clamp_Nm = 0.0;
     double tau_motor_cmd_Nm = 0.0;
     double tau_motor_actual_Nm = 0.0;
 
@@ -211,13 +201,12 @@ static bool load_csv_two_columns(const std::string& csvPath,
         double qdd_deg_s2 = 0.0;
 
         if (!parse_two_numeric_columns(line, q_deg, qdd_deg_s2)) {
-            continue;
+            continue; // skip header or bad row
         }
 
         Sample s;
         s.q_deg = q_deg;
         s.qdd_deg_s2 = qdd_deg_s2;
-
         samples.push_back(s);
     }
 
@@ -229,7 +218,7 @@ static bool load_csv_two_columns(const std::string& csvPath,
     return true;
 }
 
-// ---------- Desired velocity estimation from CSV ----------
+// ---------- Reference velocity from CSV angle ----------
 static std::vector<double> estimate_qd_deg_s(const std::vector<Sample>& samples,
                                              double dt)
 {
@@ -249,7 +238,7 @@ static std::vector<double> estimate_qd_deg_s(const std::vector<Sample>& samples,
     return qd;
 }
 
-// ---------- Parameters ----------
+// ---------- Feedforward parameters ----------
 struct FFParams
 {
     double I1_kg_m2 = 0.0;
@@ -260,60 +249,39 @@ struct FFParams
     double gearRatio = 1.0;
     double efficiency = 1.0;
 
-    // The sign convention is used ONLY inside the dynamic model.
-    // Your reference angle is link-side, but the dynamic model coordinate is opposite.
-    double modelSign = 1.0;
+    double motor_inertia = 0.0;
 
-    double deadTorque_motor_Nm = 0.1602;
+    double deadTorque_motor_Nm = 0.0;
     double velThreshold_deg_s = 0.5;
 
     double maxMotorTorqueCmd_Nm = 0.50;
 
-    // Start with 0.0 first for safe testing.
-    // Later increase slowly if needed.
-    double motor_inertia_kg_m2 = 0.0;
+    // Change this to -1.0 if your dynamic-model torque direction is opposite.
+    double torqueSign = -1.0;
+
+    // Change this to -1.0 if encoder count to link angle is inverted.
+    double encoderToLinkSign = 1.0;
 };
 
-struct PDParams
-{
-    double Kp = 0.0; // joint-side [Nm/rad]
-    double Kd = 0.0; // joint-side [Nm/(rad/s)]
-};
-
-struct FFTerms
-{
-    double q_model_deg = 0.0;
-    double qdd_model_deg_s2 = 0.0;
-
-    double inertia_Nm = 0.0;
-    double gravity_Nm = 0.0;
-    double total_Nm = 0.0;
-};
-
-// ---------- Link/motor conversion ----------
-// No sign convention here.
-static double motor_counts_to_link_deg(int32_t motorCounts,
-                                       double encoder_resolution,
-                                       const FFParams& p)
-{
-    const double motor_deg =
-        (static_cast<double>(-motorCounts) * 360.0) / encoder_resolution;
-
-    return motor_deg / p.gearRatio;
-}
-
-// No sign convention here.
-static double motor_velocity_native_to_link_deg_s(int32_t motorVelNative,
+// ---------- Feedforward dynamics ----------
+static double compute_joint_feedforward_torque_Nm(double q_deg,
+                                                  double qdd_deg_s2,
                                                   const FFParams& p)
 {
-    // If 0x606C is rpm in your setup:
-    // motor deg/s = rpm * 360 / 60 = rpm * 6
-    const double motor_deg_s = static_cast<double>(motorVelNative) * 6.0;
+    const double q_rad = deg2rad(q_deg);
+    const double qdd_rad_s2 = deg2rad(qdd_deg_s2);
 
-    return motor_deg_s / p.gearRatio;
+    const double J_total =
+        p.I1_kg_m2 + p.gearRatio * p.gearRatio * p.motor_inertia;
+
+    const double inertia_term = J_total * qdd_rad_s2;
+
+    const double gravity_term =
+        p.m1_kg * p.g * p.lc1_m * std::sin(q_rad);
+
+    return p.torqueSign * (inertia_term + gravity_term);
 }
 
-// No sign convention here.
 static double joint_to_motor_torque_Nm(double tau_joint_Nm,
                                        const FFParams& p)
 {
@@ -323,50 +291,8 @@ static double joint_to_motor_torque_Nm(double tau_joint_Nm,
     return tau_joint_Nm / (N * eta);
 }
 
-// ---------- Dynamics ----------
-// Sign convention is handled ONLY here.
-static FFTerms compute_joint_feedforward_terms_Nm(double q_ref_deg,
-                                                  double qdd_ref_deg_s2,
-                                                  const FFParams& p)
-{
-    FFTerms terms;
-
-    terms.q_model_deg = p.modelSign * q_ref_deg;
-    terms.qdd_model_deg_s2 = p.modelSign * qdd_ref_deg_s2;
-
-    const double q_model_rad = deg2rad(terms.q_model_deg);
-    const double qdd_model_rad_s2 = deg2rad(terms.qdd_model_deg_s2);
-
-    const double J_reflected_motor =
-        p.gearRatio * p.gearRatio * p.motor_inertia_kg_m2;
-
-    const double J_total = p.I1_kg_m2 + J_reflected_motor;
-
-    terms.inertia_Nm = J_total * qdd_model_rad_s2;
-    terms.gravity_Nm = p.m1_kg * p.g * p.lc1_m * std::sin(q_model_rad);
-    terms.total_Nm = terms.inertia_Nm + terms.gravity_Nm;
-
-    return terms;
-}
-
-static double compute_pd_torque_joint_Nm(double q_ref_deg,
-                                         double q_link_deg,
-                                         double qd_ref_deg_s,
-                                         double qd_link_deg_s,
-                                         const PDParams& pd)
-{
-    const double error_deg = q_ref_deg - q_link_deg;
-    const double error_dot_deg_s = qd_ref_deg_s - qd_link_deg_s;
-
-    const double error_rad = deg2rad(error_deg);
-    const double error_dot_rad_s = deg2rad(error_dot_deg_s);
-
-    return pd.Kp * error_rad + pd.Kd * error_dot_rad_s;
-}
-
-// No sign convention here.
-static double signed_dead_torque_motor_Nm(double qd_ref_deg_s,
-                                          const FFParams& p)
+static double signed_dead_torque_Nm(double qd_ref_deg_s,
+                                    const FFParams& p)
 {
     if (std::abs(qd_ref_deg_s) < p.velThreshold_deg_s) {
         return 0.0;
@@ -382,8 +308,7 @@ static bool save_log_csv(const std::string& outPath,
     std::ofstream fout(outPath);
 
     if (!fout.is_open()) {
-        std::cerr << "[ERROR] Could not open log file for writing: "
-                  << outPath << "\n";
+        std::cerr << "[ERROR] Could not open log file: " << outPath << "\n";
         return false;
     }
 
@@ -391,18 +316,11 @@ static bool save_log_csv(const std::string& outPath,
          << "q_ref_deg,"
          << "qd_ref_deg_s,"
          << "qdd_ref_deg_s2,"
-         << "q_model_deg,"
-         << "qdd_model_deg_s2,"
          << "q_link_deg,"
-         << "qd_link_deg_s,"
-         << "pos_error_deg,"
-         << "vel_error_deg_s,"
-         << "tau_inertia_joint_Nm,"
-         << "tau_gravity_joint_Nm,"
          << "tau_joint_ff_Nm,"
-         << "tau_pd_joint_Nm,"
-         << "tau_joint_total_Nm,"
+         << "tau_motor_ff_Nm,"
          << "tau_dead_motor_Nm,"
+         << "tau_motor_cmd_before_clamp_Nm,"
          << "tau_motor_cmd_Nm,"
          << "tau_motor_actual_Nm,"
          << "motor_pos_counts,"
@@ -415,18 +333,11 @@ static bool save_log_csv(const std::string& outPath,
              << r.q_ref_deg << ","
              << r.qd_ref_deg_s << ","
              << r.qdd_ref_deg_s2 << ","
-             << r.q_model_deg << ","
-             << r.qdd_model_deg_s2 << ","
              << r.q_link_deg << ","
-             << r.qd_link_deg_s << ","
-             << r.pos_error_deg << ","
-             << r.vel_error_deg_s << ","
-             << r.tau_inertia_joint_Nm << ","
-             << r.tau_gravity_joint_Nm << ","
              << r.tau_joint_ff_Nm << ","
-             << r.tau_pd_joint_Nm << ","
-             << r.tau_joint_total_Nm << ","
+             << r.tau_motor_ff_Nm << ","
              << r.tau_dead_motor_Nm << ","
+             << r.tau_motor_cmd_before_clamp_Nm << ","
              << r.tau_motor_cmd_Nm << ","
              << r.tau_motor_actual_Nm << ","
              << r.motor_pos_counts << ","
@@ -447,22 +358,22 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
+
     const unsigned short nodeId = 3;
 
     const std::string inputCsvPath = "trajectory.csv";
-    const std::string outputLogPath = "pd_feedforward_log.csv";
+    const std::string outputLogPath = "feedforward_only_log.csv";
 
     const double dt_s = 0.002;
 
     const double ratedTorque_Nm = 1.068;
-    const double Kt_Nm_per_A    = 0.0712;
+    const double Kt_Nm_per_A = 0.0712;
 
     const double encoder_resolution = 1024.0 * 4.0;
 
     const uint16_t maxTorque_permille = 1000;
     const int printEveryN = 50;
 
-    // ---------- Dynamic model parameters ----------
     FFParams ff;
 
     ff.I1_kg_m2 = 0.019815364780523;
@@ -471,48 +382,26 @@ int main()
     ff.g = 9.81;
 
     ff.gearRatio = 80.0;
-    ff.efficiency = 1.0;
+    ff.efficiency = 0.80;
 
-    // Only dynamic model uses this sign.
-    ff.modelSign = 1.0;
+    ff.motor_inertia = 0.000288;
 
     ff.deadTorque_motor_Nm = 0.1602;
     ff.velThreshold_deg_s = 0.5;
 
-    // Start low to avoid overshoot.
     ff.maxMotorTorqueCmd_Nm = 0.50;
 
     // IMPORTANT:
-    // Start with 0.0 because gearRatio^2 * motor inertia can become very large.
-    // After stable motion, try 0.000288 slowly if needed.
-    ff.motor_inertia_kg_m2 = 0.000288;
+    // If motor command direction is opposite, change this to -1.0.
+    ff.torqueSign = 1.0;
 
-    // ---------- PD control parameters ----------
-    PDParams pd;
-
-    // Start low for CST torque mode.
-    pd.Kp = 15.0;
-    pd.Kd = 0.4;
+    // IMPORTANT:
+    // If encoder count gives opposite link angle, change this to -1.0.
+    ff.encoderToLinkSign = 1.0;
 
     // =========================================================
 
     std::cout << std::fixed << std::setprecision(6);
-
-    std::cout << "[INFO] Sign convention is ONLY inside dynamic model.\n";
-    std::cout << "[INFO] q_model = modelSign * q_ref\n";
-    std::cout << "[INFO] qdd_model = modelSign * qdd_ref\n";
-    std::cout << "[INFO] modelSign = " << ff.modelSign << "\n";
-    std::cout << "[INFO] q_link = q_motor / gearRatio\n";
-    std::cout << "[INFO] tau_motor = tau_joint / gearRatio / efficiency\n";
-
-    const double J_motor_reflected =
-        ff.gearRatio * ff.gearRatio * ff.motor_inertia_kg_m2;
-
-    std::cout << "[INFO] J_link = " << ff.I1_kg_m2 << " kg*m^2\n";
-    std::cout << "[INFO] J_motor_reflected_used = "
-              << J_motor_reflected << " kg*m^2\n";
-    std::cout << "[INFO] J_total_used = "
-              << ff.I1_kg_m2 + J_motor_reflected << " kg*m^2\n";
 
     // ---------- Load trajectory ----------
     std::vector<Sample> samples;
@@ -527,13 +416,7 @@ int main()
     std::cout << "[INFO] Loaded " << samples.size()
               << " samples from " << inputCsvPath << "\n";
 
-    std::cout << "[INFO] dt = " << dt_s
-              << " s, total time = " << samples.size() * dt_s
-              << " s\n";
-
-    std::cout << "[INFO] PD gains: Kp = " << pd.Kp
-              << " Nm/rad, Kd = " << pd.Kd
-              << " Nm/(rad/s)\n";
+    std::cout << "[INFO] Feedforward-only mode. No PD feedback.\n";
 
     // ---------- Open device ----------
     handle = VCS_OpenDevice(deviceName,
@@ -546,15 +429,31 @@ int main()
         return 1;
     }
 
-    // ---------- Clear faults ---------gear-
+    // ---------- Clear faults ----------
     if (!ok(VCS_ClearFault(handle, nodeId, &err), "ClearFault")) {
         VCS_CloseDevice(handle, &err);
         return 1;
     }
 
-    // ---------- Set CST mode while disabled ----------
+    // ---------- Read rated torque from drive ----------
+    uint16_t ratedTorque_mNm = 0;
+
+    if (sdo_read_any(nodeId,
+                     0x6076,
+                     0x00,
+                     &ratedTorque_mNm,
+                     sizeof(ratedTorque_mNm),
+                     "Read 0x6076 RatedTorque")) {
+        std::cout << "[INFO] Drive stored rated torque = "
+                  << ratedTorque_mNm << " mNm = "
+                  << ratedTorque_mNm / 1000.0 << " Nm\n";
+    } else {
+        std::cerr << "[WARN] Could not read 0x6076.\n";
+    }
+
+    // ---------- Set CST mode ----------
     {
-        int8_t op = 10;
+        int8_t op = 10; // CST mode
 
         if (!ok(VCS_SetOperationMode(handle, nodeId, op, &err),
                 "SetOperationMode=CST")) {
@@ -578,23 +477,7 @@ int main()
                   << " ; expect 10 for CST\n";
     }
 
-    // ---------- Read stored rated torque ----------
-    uint16_t ratedTorque_mNm = 0;
-
-    if (sdo_read_any(nodeId,
-                     0x6076,
-                     0x00,
-                     &ratedTorque_mNm,
-                     sizeof(ratedTorque_mNm),
-                     "Read 0x6076 RatedTorque")) {
-        std::cout << "[INFO] Drive stored rated torque = "
-                  << ratedTorque_mNm << " mN*m = "
-                  << ratedTorque_mNm / 1000.0 << " N*m\n";
-    } else {
-        std::cerr << "[WARN] Could not read 0x6076.\n";
-    }
-
-    // ---------- Set max torque while disabled ----------
+    // ---------- Set max torque ----------
     {
         uint16_t probe = 0;
 
@@ -628,26 +511,21 @@ int main()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // ---------- Main playback loop ----------
+    // ---------- Main loop ----------
     std::vector<LogRow> logs;
     logs.reserve(samples.size());
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto period = std::chrono::duration<double>(dt_s);
 
-    bool first_velocity_sample = true;
-    double prev_q_link_deg = 0.0;
-
-    std::cout << "[INFO] Starting PD + feedforward torque playback...\n";
+    std::cout << "[INFO] Starting feedforward-only torque playback...\n";
 
     for (size_t k = 0; k < samples.size(); ++k) {
 
-        // Desired trajectory from CSV
         const double q_ref_deg = samples[k].q_deg;
         const double qdd_ref_deg_s2 = samples[k].qdd_deg_s2;
         const double qd_ref_deg_s = qd_ref_deg_s_vec[k];
 
-        // Read actual motor-side values from EPOS
         int32_t pos_counts = 0;
         int32_t vel_native = 0;
         int16_t tq_pm = 0;
@@ -673,73 +551,35 @@ int main()
                      sizeof(tq_pm),
                      "Read 0x6077 Torque");
 
-        // No sign convention here
+        // Encoder to link angle.
+        // Set ff.encoderToLinkSign = -1.0 if inverted.
         const double q_link_deg =
-            motor_counts_to_link_deg(pos_counts, encoder_resolution, ff);
+            ff.encoderToLinkSign *
+            (static_cast<double>(pos_counts) * 360.0) /
+            (encoder_resolution * ff.gearRatio);
 
-        // Actual link velocity
-        double qd_link_deg_s = 0.0;
-
-        // Option A: use EPOS velocity object.
-        qd_link_deg_s = motor_velocity_native_to_link_deg_s(vel_native, ff);
-
-        // Option B: numerical differentiation.
-        // If velocity object is noisy or wrong unit, comment Option A above and use this block.
-        /*
-        if (first_velocity_sample) {
-            qd_link_deg_s = 0.0;
-            first_velocity_sample = false;
-        } else {
-            qd_link_deg_s = (q_link_deg - prev_q_link_deg) / dt_s;
-        }
-        prev_q_link_deg = q_link_deg;
-        */
-
-        if (first_velocity_sample) {
-            prev_q_link_deg = q_link_deg;
-            first_velocity_sample = false;
-        }
-
-        // Feedforward torque from dynamic model
-        // This is the ONLY place where the sign convention is applied.
-        const FFTerms ff_terms =
-            compute_joint_feedforward_terms_Nm(q_ref_deg,
-                                               qdd_ref_deg_s2,
-                                               ff);
-
-        const double tau_joint_ff_Nm = ff_terms.total_Nm;
-
-        // PD feedback torque
-        const double tau_pd_joint_Nm =
-            compute_pd_torque_joint_Nm(q_ref_deg,
-                                       q_link_deg,
-                                       qd_ref_deg_s,
-                                       qd_link_deg_s,
-                                       pd);
-
-        // Total joint torque
-        const double tau_joint_total_Nm =
-            tau_joint_ff_Nm + tau_pd_joint_Nm;
+        // Joint-side feedforward torque
+        const double tau_joint_ff_Nm =
+            compute_joint_feedforward_torque_Nm(q_ref_deg,
+                                                qdd_ref_deg_s2,
+                                                ff);
 
         // Convert joint torque to motor torque
-        // No sign convention here.
-        double tau_motor_cmd_Nm =
-            joint_to_motor_torque_Nm(tau_joint_total_Nm, ff);
+        const double tau_motor_ff_Nm =
+            joint_to_motor_torque_Nm(tau_joint_ff_Nm, ff);
 
-        // Add dead torque
-        // No sign convention here.
+        // Dead torque based on reference velocity
         const double tau_dead_motor_Nm =
-            signed_dead_torque_motor_Nm(qd_ref_deg_s, ff);
+            signed_dead_torque_Nm(qd_ref_deg_s, ff);
 
-        tau_motor_cmd_Nm += tau_dead_motor_Nm;
+        double tau_motor_cmd_before_clamp_Nm =
+            tau_motor_ff_Nm + tau_dead_motor_Nm;
 
-        // Clamp motor command
-        tau_motor_cmd_Nm =
-            std::clamp(tau_motor_cmd_Nm,
+        const double tau_motor_cmd_Nm =
+            std::clamp(tau_motor_cmd_before_clamp_Nm,
                        -ff.maxMotorTorqueCmd_Nm,
                        +ff.maxMotorTorqueCmd_Nm);
 
-        // Send torque command
         if (!set_torque_Nm(nodeId,
                            tau_motor_cmd_Nm,
                            ratedTorque_Nm,
@@ -749,12 +589,8 @@ int main()
             break;
         }
 
-        // Logging
         const double tau_motor_actual_Nm =
             (static_cast<double>(tq_pm) / 1000.0) * ratedTorque_Nm;
-
-        const double pos_error_deg = q_ref_deg - q_link_deg;
-        const double vel_error_deg_s = qd_ref_deg_s - qd_link_deg_s;
 
         LogRow row;
 
@@ -764,22 +600,12 @@ int main()
         row.qd_ref_deg_s = qd_ref_deg_s;
         row.qdd_ref_deg_s2 = qdd_ref_deg_s2;
 
-        row.q_model_deg = ff_terms.q_model_deg;
-        row.qdd_model_deg_s2 = ff_terms.qdd_model_deg_s2;
-
         row.q_link_deg = q_link_deg;
-        row.qd_link_deg_s = qd_link_deg_s;
 
-        row.pos_error_deg = pos_error_deg;
-        row.vel_error_deg_s = vel_error_deg_s;
-
-        row.tau_inertia_joint_Nm = ff_terms.inertia_Nm;
-        row.tau_gravity_joint_Nm = ff_terms.gravity_Nm;
         row.tau_joint_ff_Nm = tau_joint_ff_Nm;
-        row.tau_pd_joint_Nm = tau_pd_joint_Nm;
-        row.tau_joint_total_Nm = tau_joint_total_Nm;
-
+        row.tau_motor_ff_Nm = tau_motor_ff_Nm;
         row.tau_dead_motor_Nm = tau_dead_motor_Nm;
+        row.tau_motor_cmd_before_clamp_Nm = tau_motor_cmd_before_clamp_Nm;
         row.tau_motor_cmd_Nm = tau_motor_cmd_Nm;
         row.tau_motor_actual_Nm = tau_motor_actual_Nm;
 
@@ -794,16 +620,10 @@ int main()
             std::cout << "k=" << k
                       << " t=" << row.t_s << " s"
                       << " q_ref=" << q_ref_deg << " deg"
-                      << " q_model=" << row.q_model_deg << " deg"
                       << " q_link=" << q_link_deg << " deg"
-                      << " err=" << pos_error_deg << " deg"
                       << " qd_ref=" << qd_ref_deg_s << " deg/s"
-                      << " qd_link=" << qd_link_deg_s << " deg/s"
-                      << " tau_I=" << ff_terms.inertia_Nm << " Nm"
-                      << " tau_G=" << ff_terms.gravity_Nm << " Nm"
-                      << " tau_ff=" << tau_joint_ff_Nm << " Nm"
-                      << " tau_PD=" << tau_pd_joint_Nm << " Nm"
-                      << " tau_joint_total=" << tau_joint_total_Nm << " Nm"
+                      << " tau_joint_ff=" << tau_joint_ff_Nm << " Nm"
+                      << " tau_motor_ff=" << tau_motor_ff_Nm << " Nm"
                       << " tau_dead_motor=" << tau_dead_motor_Nm << " Nm"
                       << " tau_motor_cmd=" << tau_motor_cmd_Nm << " Nm"
                       << " tau_motor_act=" << tau_motor_actual_Nm << " Nm"
@@ -818,7 +638,7 @@ int main()
         std::this_thread::sleep_until(next_time);
     }
 
-    // ---------- Ramp down to zero ----------
+    // ---------- Ramp torque to zero ----------
     std::cout << "[INFO] Ramping torque back to zero...\n";
 
     {

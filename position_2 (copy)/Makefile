@@ -1,6 +1,6 @@
 CXX = g++
-SRC = pd_copy.cpp
-OUT = pd_run
+SRC = positio.cpp
+OUT = cpc_run
 
 EPOS_INC = /home/e-wear/EPOS_Linux_Library/include
 

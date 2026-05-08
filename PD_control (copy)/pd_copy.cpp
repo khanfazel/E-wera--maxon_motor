@@ -276,8 +276,6 @@ struct FFParams
     double velThreshold_deg_s = 0.5;     // desired velocity threshold [deg/s]
 
     double maxMotorTorqueCmd_Nm = 0.50;  // motor-side software torque clamp [Nm]
-    double motor_inertia = 0.000288; 
-    
 };
 
 // ---------- PD parameters ----------
@@ -308,8 +306,7 @@ static double compute_joint_feedforward_torque_Nm(double q_deg,
     const double qdd_rad_s2 = deg2rad(qdd_deg_s2);
 
     // Inertia torque: I*qdd
- const double inertia_term =
-    (p.I1_kg_m2 + p.gearRatio * p.gearRatio * p.motor_inertia) * qdd_rad_s2;
+    const double inertia_term = (p.I1_kg_m2 + (0.000288*80*80)) * qdd_rad_s2;
 
     // Gravity torque: m*g*lc*sin(q)
     const double gravity_term = p.m1_kg * p.g * p.lc1_m * std::sin(q_rad);
@@ -357,7 +354,7 @@ static double signed_dead_torque_Nm(double qd_ref_deg_s,
     }
 
     // Dead torque sign follows desired joint velocity direction
-    return p.deadTorque_motor_Nm * signum(qd_link_deg_s);
+    return p.deadTorque_motor_Nm * signum(qd_ref_deg_s);
 }
 
 // ---------- Logging ----------
@@ -431,11 +428,12 @@ int main()
     char protocolStackName[] = "MAXON SERIAL V2";
     char interfaceName[]     = "USB";
     char portName[]          = "USB0";
-    const unsigned short nodeId = 3;
+    const unsigned short nodeId = 5;
 
     // Files
     const std::string inputCsvPath = "trajectory.csv";
     const std::string outputLogPath = "pd_feedforward_log_filtered.csv";
+
     // CSV sample time
     const double dt_s = 0.002; // 2 ms between CSV rows
 
@@ -467,21 +465,19 @@ int main()
     // Motor-side software clamp.
     // Keep this safe while tuning.
     ff.maxMotorTorqueCmd_Nm = 0.50;
-    
-    ff.motor_inertia = 0.000288;
-     
+
     // ---------- PD control parameters ----------
     PDParams pd;
 
     // These gains are on the JOINT SIDE.
-    pd.Kp = 40.0;   // Nm/rad
+    pd.Kp = 35.0;   // Nm/rad
 
     // Kd = 7 was too high/noisy. Start with this.
     pd.Kd = 1;    // Nm/(rad/s)
 
     // Limit only the PD torque on the joint side.
     // 30 Nm joint torque / 80 gear ratio = 0.375 Nm motor torque.
-    pd.maxPdTorqueJoint_Nm = 50.0;
+    pd.maxPdTorqueJoint_Nm = 30.0;
 
     // Low-pass filter value for measured joint velocity.
     // Try 0.05 to 0.20.
@@ -744,7 +740,7 @@ int main()
         // =====================================================
 
         const double tau_dead_motor_Nm =
-            signed_dead_torque_Nm(qd_link_deg_s, ff);
+            signed_dead_torque_Nm(qd_ref_deg_s, ff);
 
         tau_motor_cmd_before_clamp_Nm += tau_dead_motor_Nm;
 
@@ -893,3 +889,4 @@ int main()
 
     return 0;
 }
+

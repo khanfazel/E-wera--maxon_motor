@@ -260,17 +260,11 @@ struct FFParams
     double gearRatio = 1.0;
     double efficiency = 1.0;
 
-    // The sign convention is used ONLY inside the dynamic model.
-    // Your reference angle is link-side, but the dynamic model coordinate is opposite.
-    double modelSign = 1.0;
-
-    double deadTorque_motor_Nm = 0.1602;
+    double deadTorque_motor_Nm = 0.0;
     double velThreshold_deg_s = 0.5;
 
     double maxMotorTorqueCmd_Nm = 0.50;
 
-    // Start with 0.0 first for safe testing.
-    // Later increase slowly if needed.
     double motor_inertia_kg_m2 = 0.0;
 };
 
@@ -291,18 +285,20 @@ struct FFTerms
 };
 
 // ---------- Link/motor conversion ----------
-// No sign convention here.
+// No inversion.
+// Positive encoder count gives positive motor angle.
+// Positive motor angle gives positive link angle.
 static double motor_counts_to_link_deg(int32_t motorCounts,
                                        double encoder_resolution,
                                        const FFParams& p)
 {
     const double motor_deg =
-        (static_cast<double>(-motorCounts) * 360.0) / encoder_resolution;
+        (static_cast<double>((motorCounts) * 360.0)) / encoder_resolution;
 
     return motor_deg / p.gearRatio;
 }
 
-// No sign convention here.
+// No inversion.
 static double motor_velocity_native_to_link_deg_s(int32_t motorVelNative,
                                                   const FFParams& p)
 {
@@ -313,37 +309,38 @@ static double motor_velocity_native_to_link_deg_s(int32_t motorVelNative,
     return motor_deg_s / p.gearRatio;
 }
 
-// No sign convention here.
+// No inversion.
 static double joint_to_motor_torque_Nm(double tau_joint_Nm,
                                        const FFParams& p)
 {
     const double N = (p.gearRatio <= 0.0) ? 1.0 : p.gearRatio;
     const double eta = (p.efficiency <= 0.0) ? 1.0 : p.efficiency;
 
-    return tau_joint_Nm / (N * eta);
+    return -(tau_joint_Nm / (N * eta));
 }
 
 // ---------- Dynamics ----------
-// Sign convention is handled ONLY here.
+// No inversion.
+// Dynamic model uses q_ref directly.
 static FFTerms compute_joint_feedforward_terms_Nm(double q_ref_deg,
                                                   double qdd_ref_deg_s2,
                                                   const FFParams& p)
 {
     FFTerms terms;
 
-    terms.q_model_deg = p.modelSign * q_ref_deg;
-    terms.qdd_model_deg_s2 = p.modelSign * qdd_ref_deg_s2;
+    terms.q_model_deg = q_ref_deg;
+    terms.qdd_model_deg_s2 = qdd_ref_deg_s2;
 
-    const double q_model_rad = deg2rad(terms.q_model_deg);
-    const double qdd_model_rad_s2 = deg2rad(terms.qdd_model_deg_s2);
+    const double q_rad = deg2rad(q_ref_deg);
+    const double qdd_rad_s2 = deg2rad(qdd_ref_deg_s2);
 
     const double J_reflected_motor =
         p.gearRatio * p.gearRatio * p.motor_inertia_kg_m2;
 
     const double J_total = p.I1_kg_m2 + J_reflected_motor;
 
-    terms.inertia_Nm = J_total * qdd_model_rad_s2;
-    terms.gravity_Nm = p.m1_kg * p.g * p.lc1_m * std::sin(q_model_rad);
+    terms.inertia_Nm = J_total * qdd_rad_s2;
+    terms.gravity_Nm = p.m1_kg * p.g * p.lc1_m * std::sin(q_rad);
     terms.total_Nm = terms.inertia_Nm + terms.gravity_Nm;
 
     return terms;
@@ -364,7 +361,8 @@ static double compute_pd_torque_joint_Nm(double q_ref_deg,
     return pd.Kp * error_rad + pd.Kd * error_dot_rad_s;
 }
 
-// No sign convention here.
+// Dead torque follows reference velocity.
+// No inversion.
 static double signed_dead_torque_motor_Nm(double qd_ref_deg_s,
                                           const FFParams& p)
 {
@@ -473,35 +471,28 @@ int main()
     ff.gearRatio = 80.0;
     ff.efficiency = 1.0;
 
-    // Only dynamic model uses this sign.
-    ff.modelSign = 1.0;
-
-    ff.deadTorque_motor_Nm = 0.1602;
+    ff.deadTorque_motor_Nm = 0.0;
     ff.velThreshold_deg_s = 0.5;
 
-    // Start low to avoid overshoot.
     ff.maxMotorTorqueCmd_Nm = 0.50;
 
-    // IMPORTANT:
-    // Start with 0.0 because gearRatio^2 * motor inertia can become very large.
-    // After stable motion, try 0.000288 slowly if needed.
+    // Be careful:
+    // gearRatio^2 * motor inertia can become large.
     ff.motor_inertia_kg_m2 = 0.000288;
 
     // ---------- PD control parameters ----------
     PDParams pd;
 
-    // Start low for CST torque mode.
-    pd.Kp = 15.0;
-    pd.Kd = 0.4;
+    pd.Kp = 20.0;
+    pd.Kd = 0.5;
 
     // =========================================================
 
     std::cout << std::fixed << std::setprecision(6);
 
-    std::cout << "[INFO] Sign convention is ONLY inside dynamic model.\n";
-    std::cout << "[INFO] q_model = modelSign * q_ref\n";
-    std::cout << "[INFO] qdd_model = modelSign * qdd_ref\n";
-    std::cout << "[INFO] modelSign = " << ff.modelSign << "\n";
+    std::cout << "[INFO] No inversion/sign convention is used.\n";
+    std::cout << "[INFO] q_model = q_ref\n";
+    std::cout << "[INFO] qdd_model = qdd_ref\n";
     std::cout << "[INFO] q_link = q_motor / gearRatio\n";
     std::cout << "[INFO] tau_motor = tau_joint / gearRatio / efficiency\n";
 
@@ -546,7 +537,7 @@ int main()
         return 1;
     }
 
-    // ---------- Clear faults ---------gear-
+    // ---------- Clear faults ----------
     if (!ok(VCS_ClearFault(handle, nodeId, &err), "ClearFault")) {
         VCS_CloseDevice(handle, &err);
         return 1;
@@ -673,7 +664,7 @@ int main()
                      sizeof(tq_pm),
                      "Read 0x6077 Torque");
 
-        // No sign convention here
+        // Actual link angle from encoder count
         const double q_link_deg =
             motor_counts_to_link_deg(pos_counts, encoder_resolution, ff);
 
@@ -701,7 +692,6 @@ int main()
         }
 
         // Feedforward torque from dynamic model
-        // This is the ONLY place where the sign convention is applied.
         const FFTerms ff_terms =
             compute_joint_feedforward_terms_Nm(q_ref_deg,
                                                qdd_ref_deg_s2,
@@ -719,15 +709,13 @@ int main()
 
         // Total joint torque
         const double tau_joint_total_Nm =
-            tau_joint_ff_Nm + tau_pd_joint_Nm;
+            tau_joint_ff_Nm  -tau_pd_joint_Nm;
 
         // Convert joint torque to motor torque
-        // No sign convention here.
         double tau_motor_cmd_Nm =
             joint_to_motor_torque_Nm(tau_joint_total_Nm, ff);
 
         // Add dead torque
-        // No sign convention here.
         const double tau_dead_motor_Nm =
             signed_dead_torque_motor_Nm(qd_ref_deg_s, ff);
 

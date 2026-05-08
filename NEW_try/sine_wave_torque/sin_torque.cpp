@@ -59,6 +59,8 @@ constexpr unsigned short IDX_MAX_TORQUE    = 0x6072;
 constexpr uint16_t       IDX_POS_ACT       = 0x6064;
 constexpr unsigned short IDX_VEL_ACT       = 0x606C;
 
+constexpr double PI = 3.14159265358979323846;
+
 // ---------- Convert & command torque in N·m ----------
 static inline int16_t nm_to_permille(double tau_Nm, double ratedTorque_Nm, int16_t clamp_abs_pm = 1000)
 {
@@ -92,11 +94,14 @@ int main() {
     const double Kt_Nm_per_A    = 0.0712;
 
     // Desired command
-    const double target_tau_Nm  = 0.30;
+    // Sine torque command inputs
+    double amplitude_tau_Nm = 0.0;  // peak torque amplitude [N·m]
+    double frequency_hz     = 0.0;  // sine frequency [Hz]
+    double runSeconds       = 0.0;  // total run time [s]
+
     const uint16_t maxTorque_permille = 1000;
 
     // Loop settings
-    const int runSeconds    = 12;
     const int loopPeriod_ms = 2;
     const int enc_counts_rev = 1024;
 
@@ -105,6 +110,37 @@ int main() {
     // ===============================
 
     std::cout << std::fixed << std::setprecision(5);
+
+    // ---------- Ask user for sine trajectory inputs ----------
+    std::cout << "Enter sine torque amplitude [N·m]: ";
+    std::cin >> amplitude_tau_Nm;
+
+    std::cout << "Enter sine frequency [Hz]: ";
+    std::cin >> frequency_hz;
+
+    std::cout << "Enter run time [s]: ";
+    std::cin >> runSeconds;
+
+    if(amplitude_tau_Nm < 0.0) {
+        std::cerr << "[ERROR] Amplitude must be positive. Use sign separately if needed.\n";
+        return 1;
+    }
+
+    if(frequency_hz <= 0.0) {
+        std::cerr << "[ERROR] Frequency must be greater than 0 Hz.\n";
+        return 1;
+    }
+
+    if(runSeconds <= 0.0) {
+        std::cerr << "[ERROR] Run time must be greater than 0 seconds.\n";
+        return 1;
+    }
+
+    int16_t amplitude_permille = nm_to_permille(amplitude_tau_Nm, ratedTorque_Nm);
+
+    if(std::abs(amplitude_permille) >= maxTorque_permille) {
+        std::cerr << "[WARN] Amplitude is at/above 1000 permille and will be clamped by nm_to_permille().\n";
+    }
 
     // ---------- Open CSV log file ----------
     std::ofstream logFile(logFileName);
@@ -181,13 +217,15 @@ int main() {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // ---------- Announce setpoint ----------
-    int16_t target_permille = nm_to_permille(target_tau_Nm, ratedTorque_Nm);
-    double  est_I_A = target_tau_Nm / Kt_Nm_per_A;
+    // ---------- Announce sine setpoint ----------
+    double est_I_peak_A = amplitude_tau_Nm / Kt_Nm_per_A;
 
-    std::cout << "CST setpoint: " << target_tau_Nm << " N·m  ("
-              << target_permille << " ‰ of rated " << ratedTorque_Nm << " N·m), "
-              << "est. current ~ " << est_I_A << " A\n";
+    std::cout << "CST sine torque command:\n";
+    std::cout << "  amplitude = " << amplitude_tau_Nm << " N·m  ("
+              << amplitude_permille << " ‰ of rated " << ratedTorque_Nm << " N·m)\n";
+    std::cout << "  frequency = " << frequency_hz << " Hz\n";
+    std::cout << "  time      = " << runSeconds << " s\n";
+    std::cout << "  est. peak current ~ " << est_I_peak_A << " A\n";
 
     std::cout << "Logging to: " << logFileName << "\n";
 
@@ -196,13 +234,24 @@ int main() {
     auto period = std::chrono::milliseconds(loopPeriod_ms);
     int  tick   = 0;
 
-    std::cout << "Applying torque for " << runSeconds << " s...\n";
+    std::cout << "Applying sine torque for " << runSeconds << " s...\n";
 
-    while(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(runSeconds)) {
+    double last_tau_Nm = 0.0;
+    int16_t last_permille = 0;
+
+    while(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < runSeconds) {
 
         // Current time
         auto now = std::chrono::steady_clock::now();
         double time_s = std::chrono::duration<double>(now - t0).count();
+
+        // Generate sine torque trajectory:
+        // tau(t) = amplitude * sin(2*pi*f*t)
+        double target_tau_Nm = amplitude_tau_Nm * std::sin(2.0 * PI * frequency_hz * time_s);
+        int16_t target_permille = nm_to_permille(target_tau_Nm, ratedTorque_Nm);
+
+        last_tau_Nm = target_tau_Nm;
+        last_permille = target_permille;
 
         // Command torque
         if(!set_torque_Nm(nodeId, target_tau_Nm, ratedTorque_Nm)) break;
@@ -217,7 +266,7 @@ int main() {
         sdo_read_any(nodeId, IDX_TORQUE_ACT, SUB0, &tq_pm, sizeof(tq_pm), "Read 0x6077 Torque");
 
         // Convert for logging
-        double pos_deg = (pos * 360.0) / enc_counts_rev;
+        double pos_deg = (pos * 360.0) / enc_counts_rev*4*80;
         double actual_tq_Nm = (tq_pm / 1000.0) * ratedTorque_Nm;
 
         // ---------- Write one CSV row ----------
@@ -232,7 +281,9 @@ int main() {
 
         // Print roughly every 100 ms
         if(++tick % (100 / loopPeriod_ms) == 0) {
-            std::cout << "count=" << pos
+            std::cout << "t=" << time_s
+                      << "  target=" << target_tau_Nm << " N·m"
+                      << "  count=" << pos
                       << "  pos=" << pos_deg << " deg est"
                       << "  vel=" << vel
                       << "  actual_torque=" << tq_pm << " ‰ (" << actual_tq_Nm << " N·m)\n";
@@ -243,7 +294,7 @@ int main() {
 
     // ---------- Ramp down smoothly to 0 torque ----------
     {
-        int16_t cmd_pm = target_permille;
+        int16_t cmd_pm = last_permille;
         const int16_t step = (cmd_pm > 0) ? -10 : 10;
 
         while(cmd_pm != 0) {
