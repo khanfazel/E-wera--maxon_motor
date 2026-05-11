@@ -152,7 +152,7 @@ int main()
     //
     // Start low. Increase slowly.
     const double Kp_Nm_per_deg     = 10.0;
-    const double Kd_Nm_per_deg_s   = 0.40;
+    const double Kd_Nm_per_deg_s   = 0.37;
 
     // Limits
     const double maxJointTorque_Nm = 40.0;      // link-side torque limit

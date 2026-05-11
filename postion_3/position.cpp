@@ -154,9 +154,9 @@ if (!std::cin || (moveMode != 'r' && moveMode != 'a'))
     // IMPORTANT:
     // These are profile values for the EPOS position profile command.
     // Keep them modest first.
-    const uint32_t profileVelocity     = 150;   // conservative
-    const uint32_t profileAcceleration = 300;   // conservative
-    const uint32_t profileDeceleration = 300;   // conservative
+    const uint32_t profileVelocity     = 500;   // conservative
+    const uint32_t profileAcceleration = 500;   // conservative
+    const uint32_t profileDeceleration = 500;   // conservative
 
     const int loopPeriodMs = 50;
     const int timeoutMs    = 15000;
