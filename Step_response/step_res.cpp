@@ -138,7 +138,7 @@ int main()
 
     // Torque conversion sign:
     // From your feedforward-only test, motor torque = -joint torque / N
-    const double jointToMotorTorqueSign = 1.0;
+    const double jointToMotorTorqueSign = -1.0;
 
     // Motor constants
     double ratedTorque_Nm = 1.068;         // fallback if 0x6076 read fails
